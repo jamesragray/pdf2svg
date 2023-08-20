@@ -47,23 +47,17 @@ gchar *getAbsoluteFileName(const gchar *fileName)
 // End theft from ePDFview
 
 
-int convertPage(PopplerPage *page, const char* svgFilename)
+
+
+
+int convertPageBase(PopplerPage *page, cairo_surface_t *surface)
 {
-	// Poppler stuff 
-	double width, height;
 
 	// Cairo stuff
-	cairo_surface_t *surface;
+
 	cairo_t *drawcontext;
 
-	if (page == NULL) {
-		fprintf(stderr, "Page does not exist\n");
-		return -1;
-	}
-	poppler_page_get_size (page, &width, &height);
-
 	// Open the SVG file
-	surface = cairo_svg_surface_create(svgFilename, width, height);
 	drawcontext = cairo_create(surface);
 
 	// Render the PDF file into the SVG file
@@ -72,12 +66,49 @@ int convertPage(PopplerPage *page, const char* svgFilename)
 
 	// Close the SVG file
 	cairo_destroy(drawcontext);
-	cairo_surface_destroy(surface);
 
 	// Close the PDF file
 	g_object_unref(page);
-	
-	return 0;     
+
+	return 0;
+}
+
+
+int convertPage(PopplerPage * page,  const char* svgFilename) {
+	cairo_surface_t *surface;
+	// Poppler stuff
+	double width, height;
+	int ret;
+	if (page == NULL) {
+		fprintf(stderr, "Page does not exist\n");
+		return -1;
+	}
+	poppler_page_get_size (page, &width, &height);
+	surface = cairo_svg_surface_create(svgFilename,  width, height);
+	ret = convertPageBase(page, surface);
+	cairo_surface_destroy(surface);
+	return ret;
+}
+
+static cairo_status_t writeFunc(void* closure, const unsigned char *data, unsigned int length) {
+	printf("%.*s",length,data);
+	return CAIRO_STATUS_SUCCESS;
+}
+
+int convertPageStream(PopplerPage * page) {
+	cairo_surface_t *surface;
+	// Poppler stuff
+	double width, height;
+	int ret;
+	if (page == NULL) {
+		fprintf(stderr, "Page does not exist\n");
+		return -1;
+	}
+	poppler_page_get_size (page, &width, &height);
+	surface = cairo_svg_surface_create_for_stream(writeFunc, NULL, width, height);
+	ret = convertPageBase(page, surface);
+	cairo_surface_destroy(surface);
+	return ret;
 }
 
 int main(int argn, char *args[])
@@ -94,75 +125,99 @@ int main(int argn, char *args[])
 		printf("Usage: pdf2svg <in file.pdf> <out file.svg> [<page no>]\n");
 		return -2;
 	}
-	gchar *absoluteFileName = getAbsoluteFileName(args[1]);
-	gchar *filename_uri = g_filename_to_uri(absoluteFileName, NULL, NULL);
 	gchar *pageLabel = NULL;
-
-	char* svgFilename = args[2];
-
-	g_free(absoluteFileName);
 	if (argn == 4) {
 		// Get page number
 		pageLabel = g_strdup(args[3]);
 	}
-
-	// Open the PDF file
-	pdffile = poppler_document_new_from_file(filename_uri, NULL, NULL);
-	g_free(filename_uri);
-	if (pdffile == NULL) {
-		fprintf(stderr, "Unable to open file\n");
-		return -3;
-	}
-
 	int conversionErrors = 0;
-	// Get the page
-
-	if(pageLabel == NULL) {
+	if(strcmp(pageLabel,"stdio") == 0) {
+		int tlen = 1024;
+		int index = 0;
+		int len = tlen;
+		char* tmp = malloc(len);
+		char* buffer = malloc(len);
+		int cnt;
+		while(cnt = fread(tmp,1,tlen,stdin)) {
+			if(index + cnt > len) {
+				len*=2;
+				buffer = realloc(buffer,len);
+			}
+			memcpy(buffer+index,tmp,cnt);
+			index+=cnt;
+			if(cnt < tlen) { break; }
+		}
+		pdffile = poppler_document_new_from_data(buffer,index, NULL, NULL);
 		page = poppler_document_get_page(pdffile, 0);
-		conversionErrors = convertPage(page, svgFilename);
+		conversionErrors = convertPageStream(page);
+		g_object_unref(pdffile);
+		free(buffer);
+		free(tmp);
 	}
 	else {
-		if(strcmp(pageLabel, "all") == 0) {
-			int curError;
-			int pageCount = poppler_document_get_n_pages(pdffile);
+		gchar *absoluteFileName = getAbsoluteFileName(args[1]);
+		gchar *filename_uri = g_filename_to_uri(absoluteFileName, NULL, NULL);
 
-			if(pageCount > 9999999) {
-				fprintf(stderr, "Too many pages (>9,999,999)\n");
-				return -5;
-			}
+		char* svgFilename = args[2];
 
-			size_t svgFilenameBufLen = strlen(svgFilename) + 1;
-			char *svgFilenameBuffer = (char*)malloc(svgFilenameBufLen);
-			assert(svgFilenameBuffer != NULL);
+		g_free(absoluteFileName);
 
-			int pageInd;
-			for(pageInd = 0; pageInd < pageCount; pageInd++) {
-				while (1) {
-					size_t _wr_len = snprintf(svgFilenameBuffer, svgFilenameBufLen, svgFilename, pageInd + 1);
-					if (_wr_len >= svgFilenameBufLen) {
-						svgFilenameBufLen = _wr_len + 1;
-						svgFilenameBuffer = (char*)realloc(svgFilenameBuffer, svgFilenameBufLen);
-						assert(svgFilenameBuffer != NULL);
-						continue;
-					}
-					break;
-				}
+		// Open the PDF file
+		pdffile = poppler_document_new_from_file(filename_uri, NULL, NULL);
+		g_free(filename_uri);
+		if (pdffile == NULL) {
+			fprintf(stderr, "Unable to open file\n");
+			return -3;
+		}
 
-				page = poppler_document_get_page(pdffile, pageInd);
-				curError = convertPage(page, svgFilenameBuffer);
-				if(curError != 0)
-					conversionErrors = -1;
-			}
-			free(svgFilenameBuffer);
+		// Get the page
+
+		if(pageLabel == NULL) {
+			page = poppler_document_get_page(pdffile, 0);
+			conversionErrors = convertPage(page, svgFilename);
 		}
 		else {
-			page = poppler_document_get_page_by_label(pdffile, pageLabel);
-			conversionErrors = convertPage(page, svgFilename);
-			g_free(pageLabel);
-		}
-	}
+			if(strcmp(pageLabel, "all") == 0) {
+				int curError;
+				int pageCount = poppler_document_get_n_pages(pdffile);
 
-	g_object_unref(pdffile);
+				if(pageCount > 9999999) {
+					fprintf(stderr, "Too many pages (>9,999,999)\n");
+					return -5;
+				}
+
+				size_t svgFilenameBufLen = strlen(svgFilename) + 1;
+				char *svgFilenameBuffer = (char*)malloc(svgFilenameBufLen);
+				assert(svgFilenameBuffer != NULL);
+
+				int pageInd;
+				for(pageInd = 0; pageInd < pageCount; pageInd++) {
+					while (1) {
+						size_t _wr_len = snprintf(svgFilenameBuffer, svgFilenameBufLen, svgFilename, pageInd + 1);
+						if (_wr_len >= svgFilenameBufLen) {
+							svgFilenameBufLen = _wr_len + 1;
+							svgFilenameBuffer = (char*)realloc(svgFilenameBuffer, svgFilenameBufLen);
+							assert(svgFilenameBuffer != NULL);
+							continue;
+						}
+						break;
+					}
+
+					page = poppler_document_get_page(pdffile, pageInd);
+					curError = convertPage(page, svgFilenameBuffer);
+					if(curError != 0)
+						conversionErrors = -1;
+				}
+				free(svgFilenameBuffer);
+			}
+			else {
+				page = poppler_document_get_page_by_label(pdffile, pageLabel);
+				conversionErrors = convertPage(page, svgFilename);
+				g_free(pageLabel);
+			}
+		}
+		g_object_unref(pdffile);
+	}
 
 	if(conversionErrors != 0) {
 		return -4;
